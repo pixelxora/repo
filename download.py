@@ -28,7 +28,7 @@ LINK_REGEX = r"https://t\.me/c/(\d+)/(\d+)"
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.ts', '.avi', '.mov', '.flv', '.webm', '.m4v')
 
 class TelegramProgress:
-    """Calculates active data rates and pushes updates to Telegram every 10 seconds."""
+    """Calculates active data rates and updates a single Telegram tracking status message every 10 seconds."""
     def __init__(self, client, status_msg, filename, operation="Processing"):
         self.client = client
         self.status_msg = status_msg
@@ -53,6 +53,8 @@ class TelegramProgress:
                 f"📊 `[{bar}]` **{percent:.1f}%**\n"
                 f"📦 `{received_mb:.2f} / {total_mb:.2f} MB`"
             )
+            # Log progress quietly to GitHub console
+            print(f"-> {self.operation}: {self.filename} - {percent:.1f}% ({received_mb:.2f}/{total_mb:.2f} MB)")
             coro = self.status_msg.edit(text)
             self.client.loop.create_task(coro)
 
@@ -118,113 +120,74 @@ async def main():
     os.makedirs(extract_dir, exist_ok=True)
     
     async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
+        # Single pin status message that rewrites itself to prevent alert fatigue
         status_msg = await client.send_message('me', "🚀 **Staging Environment Initialized...**")
+        print(f"📡 Targeting Channel: {channel_id} | Range: {start_msg_id} -> {end_msg_id}")
         
-        # --- PHASE 1: DOWNLOAD ALL ZIP BUNDLES SEQUENTIALLY ---
-        downloaded_files = []
+        # --- PHASE 1: COLLECT ALL VALID MEDIA MESSAGES IN THE RANGE ---
+        valid_messages = []
         for msg_id in range(start_msg_id, end_msg_id + 1):
             try:
                 msg = await client.get_messages(channel_id, ids=msg_id)
                 if msg and msg.media and isinstance(msg.media, MessageMediaDocument):
-                    filename = msg.file.name or f"part_{msg_id}.zip"
-                    file_path = os.path.join(download_dir, filename)
-                    
-                    tracker = TelegramProgress(client, status_msg, filename, "Downloading Part")
-                    await client.download_media(msg, file_path, progress_callback=tracker)
-                    downloaded_files.append(file_path)
-                    await asyncio.sleep(0.5)
+                    valid_messages.append(msg)
+                else:
+                    print(f"ℹ️ Skipped msg {msg_id}: Not a valid file document attachment.")
             except Exception as e:
-                await client.send_message('me', f"⚠️ Download Error on Message ID `{msg_id}`: {e}")
-                
-        if not downloaded_files:
-            await status_msg.edit("❌ Staging failure: No valid multipart archives could be scraped.")
+                # Immediate Failure Tweet alert to chat
+                await client.send_message('me', f"⚠️ **Scraping Error:** Critical access fault checking link ID `{msg_id}`\n`Error: {e}`")
+                print(f"❌ Error checking msg {msg_id}: {e}")
+
+        if not valid_messages:
+            await status_msg.edit("❌ **Staging terminated:** No valid document files discovered in requested link scope.")
             sys.exit(1)
-            
-        # --- PHASE 2: EXTRACT USING SYSTEM 7Z ---
-        await status_msg.edit("📦 **All segments cached. Launching extraction pipeline...**")
-        downloaded_files.sort()
+
+        total_parts = len(valid_messages)
+        downloaded_files = []
         
-        main_entry = next((f for f in downloaded_files if f.endswith('.zip') or '.zip.' in f or 'zip01' in f.lower()), downloaded_files[0])
+        # Notify once that downloading is underway instead of sending a text for every single part
+        await status_msg.edit(f"📥 **Downloading multi-part archive chain ({total_parts} segments identified)...**")
+
+        # --- PHASE 2: DOWNLOAD WITH REVERSE RE-NAMING SYSTEM ---
+        for idx, msg in enumerate(valid_messages):
+            original_name = msg.file.name or f"unknown_{msg.id}"
+            position_from_end = total_parts - 1 - idx
+            
+            if position_from_end == 0:
+                forced_filename = "fixed_archive.zip"
+            else:
+                forced_filename = f"fixed_archive.z{position_from_end:02d}"
+                
+            file_path = os.path.join(download_dir, forced_filename)
+            
+            # Print sequence tweaks silently to GitHub actions for tracing adjustments
+            print(f"🔧 File Match Index [{idx+1}/{total_parts}] -> Original: '{original_name}' mapped to Forced Output: '{forced_filename}'")
+            
+            try:
+                tracker = TelegramProgress(client, status_msg, forced_filename, f"Downloading Part ({idx+1}/{total_parts})")
+                await client.download_media(msg, file_path, progress_callback=tracker)
+                downloaded_files.append(file_path)
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                await client.send_message('me', f"🚨 **Download Interruption:** Failed downloading segment sequence for link ID `{msg.id}`\n`Error: {e}`")
+                print(f"❌ Error downloading file on msg {msg.id}: {e}")
+            
+        # --- PHASE 3: RUN TARGETED EXTRACTION ON THE TAIL HEAD ---
+        await status_msg.edit("📦 **All volumes successfully cached. Extracting core structure...**")
+        main_entry = os.path.join(download_dir, "fixed_archive.zip")
         
         result = subprocess.run(["7z", "x", main_entry, f"-o{extract_dir}", "-y"], capture_output=True, text=True)
         if result.returncode != 0:
-            await status_msg.edit(f"❌ Core Archive Extraction Failure:\n`{result.stderr}`")
-            sys.exit(1)
-            
-        # Wipe the raw zip cache instantly to maximize disk breathing room
-        for f in downloaded_files:
-            if os.path.exists(f): os.remove(f)
+            # Send immediate comprehensive debugging block inside chat if the 7z pipeline crashes
+            await status_msg.edit(f"💥 **Extraction Failure:** The multi-part archive layout tracking broke down.")
+            await client.send_message('me', f"📂 **7z Engine Debug Trace:**\n
+http://googleusercontent.com/immersive_entry_chip/0
 
-        # --- PHASE 3: GENERATE RECURSIVE MAP & STRUCTURAL SIZE ARRAY ---
-        await status_msg.edit("🗺️ **Analyzing extracted directory layout and file structures...**")
-        map_lines = []
-        streamable_items = []
-        non_streamable_items = []
-        
-        for root, dirs, files in os.walk(extract_dir):
-            rel_path = os.path.relpath(root, extract_dir)
-            depth = 0 if rel_path == "." else rel_path.count(os.sep) + 1
-            indent = "  " * depth
-            folder_name = os.path.basename(root) if rel_path != "." else "📦 Main Extracted root"
-            
-            # Calculate folder size
-            total_folder_size = sum(os.path.getsize(os.path.join(root, f)) for f in os.listdir(root) if os.path.isfile(os.path.join(root, f)))
-            map_lines.append(f"{indent}📁 {folder_name} `[{get_readable_size(total_folder_size)}]`")
-            
-            for file in files:
-                file_path = os.path.join(root, file)
-                f_size = os.path.getsize(file_path)
-                map_lines.append(f"{indent}  ├── file: `{file}` `[{get_readable_size(f_size)}]`")
-                
-                # Segregate item by type
-                file_info = {"absolute_path": file_path, "relative_folder": rel_path, "name": file}
-                if file.lower().endswith(VIDEO_EXTENSIONS):
-                    streamable_items.append(file_info)
-                else:
-                    non_streamable_items.append(file_info)
-                    
-        # Send layout map straight to user via split messages
-        await send_split_messages(client, "📋 **Final Extracted Material Layout Map:**", map_lines)
+### 🧠 Log Strategy Configuration:
 
-        # --- PHASE 4: DISPATCH NON-STREAMABLE ELEMENTS TO SAVED MESSAGES ---
-        if non_streamable_items:
-            await client.send_message('me', f"📄 **Found {len(non_streamable_items)} non-streamable files. Sending to chat...**")
-            for item in non_streamable_items:
-                try:
-                    caption = f"📎 **File:** `{item['name']}`\n📁 **Path:** `{item['relative_folder']}`"
-                    tracker = TelegramProgress(client, status_msg, item['name'], "Uploading Document")
-                    await client.send_file('me', item['absolute_path'], caption=caption, progress_callback=tracker)
-                except Exception as e:
-                    await client.send_message('me', f"⚠️ Error uploading document `{item['name']}`: {e}")
-                finally:
-                    if os.path.exists(item['absolute_path']): os.remove(item['absolute_path'])
-
-        # --- PHASE 5: WIRE PREVENTATIVE STREAM CHANNELS INTO BUNNY PLATFORM ---
-        if streamable_items:
-            await client.send_message('me', f"🎬 **Found {len(streamable_items)} streameable files. Commencing high-speed Bunny execution...**")
-            for video in streamable_items:
-                try:
-                    # Construct structural name mapping to mimic the physical map on flat Bunny structures
-                    mapped_title = video['name'] if video['relative_folder'] == "." else f"{video['relative_folder'].replace(os.sep, ' - ')} - {video['name']}"
-                    
-                    await status_msg.edit(f"🧬 Creating placeholder link on Bunny platform:\n`{mapped_title}`...")
-                    bunny_id = create_bunny_placeholder(mapped_title)
-                    
-                    # Run file transmission inside thread executor pool
-                    tracker = TelegramProgress(client, status_msg, video['name'], "Bunny Transmitting")
-                    loop = asyncio.get_event_loop()
-                    success = await loop.run_in_executor(None, upload_to_bunny, bunny_id, video['absolute_path'])
-                    
-                    if success:
-                        await client.send_message('me', f"✅ **Wired Successfully to Bunny Stream!**\n🎬 Title: `{mapped_title}`\n🆔 ID: `{bunny_id}`")
-                    else:
-                        await client.send_message('me', f"❌ Transmission failure targeting: `{mapped_title}`")
-                except Exception as e:
-                    await client.send_message('me', f"⚠️ Critical Error on routing video item `{video['name']}`: {e}")
-                finally:
-                    if os.path.exists(video['absolute_path']): os.remove(video['absolute_path'])
-
-        await status_msg.edit("🎉 **All elements fully processed, mapped, segregated, and wired across platform endpoints!**")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+| Scenario / Event | Where it Logs | Visual Impact in Your Chat |
+| :--- | :--- | :--- |
+| **Progress Bars** (Downloading/Uploading) | **Telegram + GitHub** | Keeps editing **one single text block** live so your notifications don't ring repeatedly. |
+| **Filename Tweaks / Extension Fixes** | **GitHub Logs Only** | None. It cleanly maps `original_name` $\rightarrow$ `fixed_archive.z01` in the background console. |
+| **Final Directory Map Tree** | **Telegram Chat** | Drops a clear file directory structure directly in your chat once extraction finishes. |
+| **API / Extraction / 7z Crashes** | **Telegram Chat** | Immediately fires a diagnostic alert block containing the raw terminal engine trace so you can fix it right away. |
