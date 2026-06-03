@@ -7,17 +7,16 @@ from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 import aiohttp
 
-# --- CONFIGURATION ---
+# --- STREAM-SPECIFIC CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", 12345))
 API_HASH = os.environ.get("API_HASH", "your_api_hash")
 SESSION_STRING = os.environ.get("SESSION_STRING", "your_pyrogram_session")
-BUNNY_STORAGE_ZONE = os.environ.get("BUNNY_STORAGE_ZONE", "my-zone")
-BUNNY_API_KEY = os.environ.get("BUNNY_API_KEY", "your_bunny_api_key")
-BUNNY_REGION = os.environ.get("BUNNY_REGION", "storage") 
+
+BUNNY_LIBRARY_ID = os.environ.get("BUNNY_LIBRARY_ID", "your_library_id")
+BUNNY_STREAM_KEY = os.environ.get("BUNNY_STREAM_KEY", "your_stream_api_key")
 
 app = Client("userbot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
 
-# --- HELPER: FORMAT SIZE ---
 def human_size(num: float) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if num < 1024.0:
@@ -25,7 +24,7 @@ def human_size(num: float) -> str:
         num /= 1024.0
     return f"{num:.2f} PB"
 
-# --- HELPER: PROGRESS BAR (10s Delay for User updates) ---
+# --- HELPER: PROGRESS BAR (10-Second Delay Throttle) ---
 async def progress_bar(current, total, status_msg, start_time, action_text="Processing"):
     now = time.time()
     if not hasattr(progress_bar, "last_update"):
@@ -70,7 +69,7 @@ async def handle_media(client, message):
     file_size = media.file_size
     status_msg = await message.reply_text("⚡ _Analyzing incoming file pipeline..._", quote=True)
 
-    # 1. ZIP Inspection
+    # --- ZIP FILE LOGIC ---
     if file_name.lower().endswith('.zip'):
         await status_msg.edit_text("📂 *Downloading ZIP index to generate map...*")
         start_time = time.time()
@@ -107,41 +106,66 @@ async def handle_media(client, message):
             if os.path.exists(local_path):
                 os.remove(local_path)
 
-    # 2. Streamable files Upload to Bunny
+    # --- BUNNY STREAM LOGIC (.ts, .mp4, .mkv, etc.) ---
     elif file_name.lower().endswith(('.ts', '.mp4', '.mkv', '.webm', '.avi', '.mov')):
-        await status_msg.edit_text("🚀 *Initialising direct stream to Bunny.net...*")
+        await status_msg.edit_text("🎬 *Step 1: Creating Video instance in Bunny Stream...*")
         
-        async def file_stream_generator():
-            current_buffered = 0
-            async for chunk in client.stream_media(message):
-                yield chunk
-                current_buffered += len(chunk)
-                await progress_bar(current_buffered, file_size, status_msg, start_time, "Streaming to Bunny")
-
-        start_time = time.time()
-        endpoint = f"https://{BUNNY_REGION}.bunnystorage.com/{BUNNY_STORAGE_ZONE}/{file_name}"
+        base_url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY_ID}/videos"
         headers = {
-            "AccessKey": BUNNY_API_KEY,
-            "Content-Type": mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+            "AccessKey": BUNNY_STREAM_KEY,
+            "accept": "application/json",
+            "content-type": "application/json"
         }
+        
+        async with aiohttp.ClientSession() as session:
+            video_id = None
+            try:
+                async with session.post(base_url, json={"title": file_name}, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        video_id = data.get("guid")
+                    else:
+                        err_text = await resp.text()
+                        await status_msg.edit_text(f"❌ Failed creating video instance: `{resp.status}`\n`{err_text}`")
+                        return
+            except Exception as e:
+                await status_msg.edit_text(f"❌ Connection error during allocation: `{str(e)}`")
+                return
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.put(endpoint, data=file_stream_generator(), headers=headers) as response:
-                    if response.status in [200, 201]:
+            await status_msg.edit_text("🚀 *Step 2: Pumping raw binary data to Stream...*")
+            start_time = time.time()
+            
+            async def file_stream_generator():
+                current_buffered = 0
+                async for chunk in client.stream_media(message):
+                    yield chunk
+                    current_buffered += len(chunk)
+                    await progress_bar(current_buffered, file_size, status_msg, start_time, "Streaming to Bunny Video")
+
+            upload_url = f"{base_url}/{video_id}"
+            upload_headers = {
+                "AccessKey": BUNNY_STREAM_KEY,
+                "Content-Type": "application/octet-stream"
+            }
+            
+            try:
+                async with session.put(upload_url, data=file_stream_generator(), headers=upload_headers) as response:
+                    if response.status == 200:
                         elapsed = time.time() - start_time
                         await status_msg.edit_text(
-                            f"✅ **Uploaded Successfully to Bunny.net!**\n\n"
-                            f"🌐 **File:** `{file_name}`\n"
+                            f"✅ **Video Direct Stream Completed!**\n\n"
+                            f"🌐 **Title:** `{file_name}`\n"
+                            f"🆔 **Video ID:** `{video_id}`\n"
                             f"📦 **Size:** {human_size(file_size)}\n"
-                            f"⏱️ **Time Taken:** {int(elapsed // 60)}m {int(elapsed % 60)}s"
+                            f"⏱️ **Time:** {int(elapsed // 60)}m {int(elapsed % 60)}s\n\n"
+                            f"⚙️ _Bunny is now processing resolutions/transcoding._"
                         )
                     else:
-                        await status_msg.edit_text(f"❌ Bunny Error Code: `{response.status}`")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ Stream Error: `{str(e)}`")
+                        await status_msg.edit_text(f"❌ Binary delivery failed. Code: `{response.status}`")
+            except Exception as e:
+                await status_msg.edit_text(f"❌ Stream delivery broken: `{str(e)}`")
     else:
-        await status_msg.edit_text("⚠️ Please forward a `.zip` or a streamable video format.")
+        await status_msg.edit_text("⚠️ Unsupported format. Use a `.zip` or a streamable video.")
 
 if __name__ == "__main__":
     app.run()
