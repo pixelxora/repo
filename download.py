@@ -134,7 +134,7 @@ async def main():
                 else:
                     print(f"ℹ️ Skipped msg {msg_id}: Not a valid file document attachment.")
             except Exception as e:
-                # Immediate Failure Tweet alert to chat
+                # Immediate Failure alert to chat
                 await client.send_message('me', f"⚠️ **Scraping Error:** Critical access fault checking link ID `{msg_id}`\n`Error: {e}`")
                 print(f"❌ Error checking msg {msg_id}: {e}")
 
@@ -179,15 +179,82 @@ async def main():
         result = subprocess.run(["7z", "x", main_entry, f"-o{extract_dir}", "-y"], capture_output=True, text=True)
         if result.returncode != 0:
             # Send immediate comprehensive debugging block inside chat if the 7z pipeline crashes
-            await status_msg.edit(f"💥 **Extraction Failure:** The multi-part archive layout tracking broke down.")
-            await client.send_message('me', f"📂 **7z Engine Debug Trace:**\n
-http://googleusercontent.com/immersive_entry_chip/0
+            await status_msg.edit("💥 **Extraction Failure:** The multi-part archive layout tracking broke down.")
+            
+            # Single line concatenation to prevent any multi-line copy-paste syntax errors
+            debug_trace = result.stderr[:3500]
+            await client.send_message('me', "📂 **7z Engine Debug Trace:**\n```\n" + debug_trace + "\n```")
+            print(f"❌ 7z Error Output:\n{result.stderr}")
+            sys.exit(1)
+            
+        # Clear original archive blocks out of workspace memory
+        for f in downloaded_files:
+            if os.path.exists(f): os.remove(f)
 
-### 🧠 Log Strategy Configuration:
+        # --- PHASE 4: GENERATE RECURSIVE MAP ---
+        await status_msg.edit("🗺️ **Analyzing extracted structures...**")
+        map_lines = []
+        streamable_items = []
+        non_streamable_items = []
+        
+        for root, dirs, files in os.walk(extract_dir):
+            rel_path = os.path.relpath(root, extract_dir)
+            depth = 0 if rel_path == "." else rel_path.count(os.sep) + 1
+            indent = "  " * depth
+            folder_name = os.path.basename(root) if rel_path != "." else "📦 Main Extracted Root"
+            
+            total_folder_size = sum(os.path.getsize(os.path.join(root, f)) for f in os.listdir(root) if os.path.isfile(os.path.join(root, f)))
+            map_lines.append(f"{indent}📁 {folder_name} `[{get_readable_size(total_folder_size)}]`")
+            
+            for file in files:
+                file_path = os.path.join(root, file)
+                f_size = os.path.getsize(file_path)
+                map_lines.append(f"{indent}  ├── file: `{file}` `[{get_readable_size(f_size)}]`")
+                
+                file_info = {"absolute_path": file_path, "relative_folder": rel_path, "name": file}
+                if file.lower().endswith(VIDEO_EXTENSIONS):
+                    streamable_items.append(file_info)
+                else:
+                    non_streamable_items.append(file_info)
+                    
+        # Send layout map straight to user via split messages (This is a Main Event)
+        await send_split_messages(client, "📋 **Final Extracted Material Layout Map:**", map_lines)
 
-| Scenario / Event | Where it Logs | Visual Impact in Your Chat |
-| :--- | :--- | :--- |
-| **Progress Bars** (Downloading/Uploading) | **Telegram + GitHub** | Keeps editing **one single text block** live so your notifications don't ring repeatedly. |
-| **Filename Tweaks / Extension Fixes** | **GitHub Logs Only** | None. It cleanly maps `original_name` $\rightarrow$ `fixed_archive.z01` in the background console. |
-| **Final Directory Map Tree** | **Telegram Chat** | Drops a clear file directory structure directly in your chat once extraction finishes. |
-| **API / Extraction / 7z Crashes** | **Telegram Chat** | Immediately fires a diagnostic alert block containing the raw terminal engine trace so you can fix it right away. |
+        # --- PHASE 5: DISPATCH NON-STREAMABLE ELEMENTS ---
+        if non_streamable_items:
+            print(f"ℹ️ Found {len(non_streamable_items)} non-streamable elements. Uploading to Saved Messages...")
+            for item in non_streamable_items:
+                try:
+                    caption = f"📎 **File:** `{item['name']}`\n📁 **Path:** `{item['relative_folder']}`"
+                    tracker = TelegramProgress(client, status_msg, item['name'], "Uploading Document")
+                    await client.send_file('me', item['absolute_path'], caption=caption, progress_callback=tracker)
+                except Exception as e:
+                    await client.send_message('me', f"⚠️ **File Route Failure:** Failed adding `{item['name']}` to Telegram chat queue.\n`Error: {e}`")
+                finally:
+                    if os.path.exists(item['absolute_path']): os.remove(item['absolute_path'])
+
+        # --- PHASE 6: WIRE VIDEO SEGMENTS INTO BUNNY DASHBOARD ---
+        if streamable_items:
+            print(f"🎬 Found {len(streamable_items)} streamable elements. Delivering to Bunny Stream...")
+            for video in streamable_items:
+                try:
+                    mapped_title = video['name'] if video['relative_folder'] == "." else f"{video['relative_folder'].replace(os.sep, ' - ')} - {video['name']}"
+                    
+                    print(f"🧬 Building Bunny item footprint for: {mapped_title}")
+                    bunny_id = create_bunny_placeholder(mapped_title)
+                    
+                    tracker = TelegramProgress(client, status_msg, video['name'], "Bunny Transmitting")
+                    loop = asyncio.get_event_loop()
+                    success = await loop.run_in_executor(None, upload_to_bunny, bunny_id, video['absolute_path'])
+                    
+                    if not success:
+                        await client.send_message('me', f"❌ **Bunny Stream Rejection:** Transmission handshake timed out for video object: `{mapped_title}`")
+                except Exception as e:
+                    await client.send_message('me', f"⚠️ **Bunny API Error:** Couldn't pipe item `{video['name']}`\n`Error: {e}`")
+                finally:
+                    if os.path.exists(video['absolute_path']): os.remove(video['absolute_path'])
+
+        await status_msg.edit("🎉 **All elements fully inverted, extracted, mapped, and wired successfully!**")
+
+if __name__ == "__main__":
+    asyncio.run(main())
