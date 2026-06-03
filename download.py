@@ -7,16 +7,16 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaDocument
 
-# Validate environment variables
-required_vars = ["TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_STRING_SESSION", "START_LINK", "END_LINK"]
+# Validate environment variables (Using your exact secret names)
+required_vars = ["API_ID", "API_HASH", "SESSION_STRING", "START_LINK", "END_LINK"]
 missing_vars = [var for var in required_vars if not os.environ.get(var)]
 if missing_vars:
     print(f"❌ Error: Missing required environment variables: {', '.join(missing_vars)}")
     sys.exit(1)
 
-API_ID = int(os.environ["TELEGRAM_API_ID"])
-API_HASH = os.environ["TELEGRAM_API_HASH"]
-STRING_SESSION = os.environ["TELEGRAM_STRING_SESSION"]
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+STRING_SESSION = os.environ["SESSION_STRING"]
 START_LINK = os.environ["START_LINK"]
 END_LINK = os.environ["END_LINK"]
 
