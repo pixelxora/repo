@@ -37,6 +37,8 @@ jobs:
         API_ID: ${{ secrets.API_ID }}
         API_HASH: ${{ secrets.API_HASH }}
         SESSION_STRING: ${{ secrets.SESSION_STRING }}
+        BUNNY_LIBRARY_ID: ${{ secrets.BUNNY_LIBRARY_ID }}
+        BUNNY_STREAM_KEY: ${{ secrets.BUNNY_STREAM_KEY }}
         START_LINK: ${{ github.event.inputs.start_link }}
         END_LINK: ${{ github.event.inputs.end_link }}
       run: python download.py
