@@ -40,10 +40,3 @@ jobs:
         START_LINK: ${{ github.event.inputs.start_link }}
         END_LINK: ${{ github.event.inputs.end_link }}
       run: python download.py
-
-    - name: Push Extracted Materials to Output Queue
-      uses: actions/upload-artifact@v4
-      with:
-        name: extracted-materials-queue
-        path: ./extracted_material/
-        retention-days: 3
