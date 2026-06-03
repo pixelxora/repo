@@ -58,6 +58,86 @@ async def progress_bar(current, total, status_msg, start_time, action_text="Proc
     except Exception:
         pass
 
+# --- HELPER: BUILD A REAL TREE MAP ---
+def build_zip_tree(zip_file_path):
+    def empty_node():
+        return {"_files": {}}
+
+    tree = empty_node()
+
+    with zipfile.ZipFile(zip_file_path, 'r') as z:
+        for info in z.infolist():
+            if info.filename.startswith('__MACOSX') or info.filename.endswith('.DS_Store'):
+                continue # Ignore system garbage files
+            
+            parts = [p for p in info.filename.split('/') if p]
+            if not parts:
+                continue
+                
+            current_node = tree
+            for part in parts[:-1]:
+                if part not in current_node:
+                    current_node[part] = empty_node()
+                current_node = current_node[part]
+            
+            if not info.is_dir():
+                current_node["_files"][parts[-1]] = human_size(info.file_size)
+            else:
+                if parts[-1] not in current_node:
+                    current_node[parts[-1]] = empty_node()
+
+    lines = []
+    
+    def render_node(node, prefix=""):
+        dirs = sorted([k for k in node.keys() if k != "_files"])
+        files = sorted(node["_files"].keys())
+        total_items = len(dirs) + len(files)
+        
+        for i, d in enumerate(dirs):
+            is_last = (i == total_items - 1 and not files)
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{prefix}{connector}📁 {d}/")
+            new_prefix = prefix + ("    " if is_last else "│   ")
+            render_node(node[d], new_prefix)
+            
+        for i, f in enumerate(files):
+            is_last = (i == len(files) - 1)
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{prefix}{connector}📄 {f} ({node['_files'][f]})")
+
+    render_node(tree)
+    return lines
+
+# --- HELPER: SEND SPLIT MESSAGES SAFE FROM CHARACTER LIMITS ---
+async def send_large_tree(message, lines):
+    header = "📁 **ZIP Directory Structural Map:**\n"
+    current_chunk = "```text\n"
+    max_chars = 3900 # Absolute threshold protection limit per bubble block
+    
+    first_message = True
+
+    for line in lines:
+        # Check if adding this line goes past the bubble text limit
+        if len(current_chunk) + len(line) + 10 > max_chars:
+            current_chunk += "```"
+            if first_message:
+                await message.reply_text(f"{header}{current_chunk}", quote=True)
+                first_message = False
+            else:
+                await message.reply_text(current_chunk)
+            await asyncio.sleep(1) # Prevent flooding Telegram API
+            current_chunk = "```text\n"
+        
+        current_chunk += line + "\n"
+    
+    # Send remaining lines chunk
+    if current_chunk != "```text\n":
+        current_chunk += "```"
+        if first_message:
+            await message.reply_text(f"{header}{current_chunk}", quote=True)
+        else:
+            await message.reply_text(current_chunk)
+
 # --- HANDLER: MEDIA HANDLING ---
 @app.on_message(filters.document | filters.video)
 async def handle_media(client, message):
@@ -79,29 +159,18 @@ async def handle_media(client, message):
             progress_args=(status_msg, start_time, "Downloading ZIP")
         )
         
-        await status_msg.edit_text("🏗️ *Generating folder tree...*")
+        await status_msg.edit_text("🏗️ *Generating nested tree map...*")
         try:
-            with zipfile.ZipFile(local_path, 'r') as z:
-                tree_lines = ["📁 **ZIP Contents:**\n"]
-                for info in sorted(z.infolist(), key=lambda x: x.filename):
-                    parts = info.filename.rstrip('/').split('/')
-                    depth = len(parts) - 1
-                    indent = "    " * depth
-                    if info.is_dir():
-                        tree_lines.append(f"{indent}└── 📁 {parts[-1]}/")
-                    else:
-                        tree_lines.append(f"{indent}└── 📄 {parts[-1]} *({human_size(info.file_size)})*")
+            tree_lines = build_zip_tree(local_path)
+            await status_msg.delete() # Clear the layout processing status message
+            
+            if not tree_lines:
+                await message.reply_text("⚠ The ZIP file looks empty.", quote=True)
+            else:
+                await send_large_tree(message, tree_lines)
                 
-                output_text = "\n".join(tree_lines)
-                if len(output_text) > 4000:
-                    with open("tree.txt", "w", encoding="utf-8") as f:
-                        f.write(output_text)
-                    await message.reply_document("tree.txt", caption="📂 Structure map.")
-                    os.remove("tree.txt")
-                else:
-                    await status_msg.edit_text(output_text)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Failed to parse ZIP: {str(e)}")
+            await message.reply_text(f"❌ Failed to map ZIP layout: `{str(e)}`", quote=True)
         finally:
             if os.path.exists(local_path):
                 os.remove(local_path)
@@ -110,7 +179,7 @@ async def handle_media(client, message):
     elif file_name.lower().endswith(('.ts', '.mp4', '.mkv', '.webm', '.avi', '.mov')):
         await status_msg.edit_text("🎬 *Step 1: Creating Video instance in Bunny Stream...*")
         
-        base_url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY_ID}/videos"
+        base_url = f"[https://video.bunnycdn.com/library/](https://video.bunnycdn.com/library/){BUNNY_LIBRARY_ID}/videos"
         headers = {
             "AccessKey": BUNNY_STREAM_KEY,
             "accept": "application/json",
