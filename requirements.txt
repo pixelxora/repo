@@ -1,3 +1,2 @@
-pyrogram
+telethon
 tgcrypto
-aiohttp
