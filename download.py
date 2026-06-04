@@ -5,6 +5,7 @@ import time
 import requests
 import asyncio
 import subprocess
+import socket
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaDocument
@@ -107,15 +108,36 @@ async def main():
     # Import the obfuscated layer to bypass GitHub data center firewall restrictions
     from telethon.network import ConnectionTcpObfuscated
 
-    print("🛰️ Establishing Obfuscated MTProto Channel to bypass network timeouts...")
-    async with TelegramClient(
+    print("🛰️ Initializing Network Cluster via Obfuscated MTProto...")
+    client = TelegramClient(
         StringSession(STRING_SESSION), 
         API_ID, 
         API_HASH,
-        connection=ConnectionTcpObfuscated
-    ) as client:
+        connection=ConnectionTcpObfuscated,
+        connection_retries=3,      # Don't loop infinitely on a dead IP range
+        retry_delay=2,             # Cycle quickly between attempts
+        timeout=15                 # Drop the socket if it freezes silently for 15 seconds
+    )
+
+    try:
+        print("🔌 Attempting live handshake with Telegram Data Centers...")
+        await client.connect()
+        print("🔓 Handshake established. Validating session state...")
+        
+        if not await client.is_user_authorized():
+            print("❌ Error: Provided SESSION_STRING is invalid or has expired.")
+            sys.exit(1)
+            
+        print("✅ Core Channel Authorized Successfully!")
         status_msg = await client.send_message('me', "🚀 **High-Speed Staging Cluster Initialized...**")
         
+    except (asyncio.TimeoutError, socket.timeout, ConnectionError) as net_err:
+        print(f"❌ Network Block Detected: Telegram firewall dropped connection request ({net_err}).")
+        print("💡 TIP: The current GitHub runner IP is blacklisted. Cancelling job so you can re-run on a fresh machine slot.")
+        sys.exit(1)
+
+    # Wrap the operational pipeline inside the established authenticated connection context
+    async with client:
         # --- PHASE 1: COLLECT CHAT MESSAGES ---
         valid_messages = []
         for msg_id in range(start_msg_id, end_msg_id + 1):
