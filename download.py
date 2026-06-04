@@ -26,40 +26,22 @@ BUNNY_STREAM_KEY = os.environ["BUNNY_STREAM_KEY"]
 
 LINK_REGEX = r"https://t\.me/c/(\d+)/(\d+)"
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.ts', '.avi', '.mov', '.flv', '.webm', '.m4v')
+MAX_CONCURRENT_DOWNLOADS = 3  # Maximum concurrent chunks to avoid flood limits
 
 class TelegramProgress:
-    """Calculates active data rates and updates a single Telegram tracking status message every 10 seconds."""
-    def __init__(self, client, status_msg, filename, operation="Processing"):
-        self.client = client
-        self.status_msg = status_msg
+    """Calculates download pacing and reports updates to the console."""
+    def __init__(self, filename):
         self.filename = filename
-        self.operation = operation
         self.last_updated_time = time.time()
 
     def __call__(self, received, total):
         now = time.time()
-        if now - self.last_updated_time >= 10 or received == total:
+        if now - self.last_updated_time >= 15 or received == total:
             self.last_updated_time = now
             percent = (received / total) * 100 if total else 0
-            received_mb = received / (1024 * 1024)
-            total_mb = total / (1024 * 1024) if total else 0
-            
-            bar_length = 15
-            filled_length = int(round(bar_length * received / float(total))) if total else 0
-            bar = '█' * filled_length + '░' * (bar_length - filled_length)
-            
-            text = (
-                f"⚡ **{self.operation}:** `{self.filename}`\n"
-                f"📊 `[{bar}]` **{percent:.1f}%**\n"
-                f"📦 `{received_mb:.2f} / {total_mb:.2f} MB`"
-            )
-            # Log progress quietly to GitHub console
-            print(f"-> {self.operation}: {self.filename} - {percent:.1f}% ({received_mb:.2f}/{total_mb:.2f} MB)")
-            coro = self.status_msg.edit(text)
-            self.client.loop.create_task(coro)
+            print(f"⚡ [Downloading] {self.filename} -> {percent:.1f}%")
 
 def get_readable_size(size_in_bytes):
-    """Converts raw bytes into human-readable text strings."""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if size_in_bytes < 1024.0:
             return f"{size_in_bytes:.2f} {unit}"
@@ -67,7 +49,6 @@ def get_readable_size(size_in_bytes):
     return f"{size_in_bytes:.2f} TB"
 
 async def send_split_messages(client, header, content_lines):
-    """Assembles and pushes multi-message text blocks safely respecting Telegram character limits."""
     current_message = header + "\n"
     for line in content_lines:
         if len(current_message) + len(line) + 2 > 4000:
@@ -79,35 +60,39 @@ async def send_split_messages(client, header, content_lines):
         await client.send_message('me', current_message)
 
 def create_bunny_placeholder(title):
-    """Registers a clean metadata collection reference inside Bunny Stream network layers."""
     url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY_ID}/videos"
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "AccessKey": BUNNY_STREAM_KEY
-    }
+    headers = {"accept": "application/json", "content-type": "application/json", "AccessKey": BUNNY_STREAM_KEY}
     response = requests.post(url, json={"title": title}, headers=headers)
     if response.status_code == 200:
         return response.json().get("guid")
     raise Exception(f"Bunny API Registration Failure: {response.text}")
 
 def upload_to_bunny(video_id, file_path):
-    """Transmits structural binary streams directly to the targeted execution target endpoint."""
     url = f"https://video.bunnycdn.com/library/{BUNNY_LIBRARY_ID}/videos/{video_id}"
-    headers = {
-        "accept": "application/json",
-        "AccessKey": BUNNY_STREAM_KEY
-    }
+    headers = {"accept": "application/json", "AccessKey": BUNNY_STREAM_KEY}
     with open(file_path, "rb") as video_data:
         response = requests.put(url, data=video_data, headers=headers)
     return response.status_code == 200
+
+async def download_worker(semaphore, client, msg, file_path, forced_filename):
+    """Asynchronously streams down a media part inside the shared execution pool."""
+    async with semaphore:
+        print(f"📥 High-Speed Worker Engaged -> Target: {forced_filename}")
+        tracker = TelegramProgress(forced_filename)
+        try:
+            await client.download_media(msg, file_path, progress_callback=tracker)
+            print(f"✅ Worker Completed -> Downloaded: {forced_filename}")
+            return file_path
+        except Exception as e:
+            print(f"❌ Worker Failed on {forced_filename}: {e}")
+            return None
 
 async def main():
     start_match = re.search(LINK_REGEX, START_LINK)
     end_match = re.search(LINK_REGEX, END_LINK)
     
     if not start_match or not end_match:
-        print("❌ Error: Invalid target channel message range links context parsing failed.")
+        print("❌ Error: Channel links could not be parsed successfully.")
         sys.exit(1)
         
     channel_id = int(f"-100{start_match.group(1)}")
@@ -120,79 +105,66 @@ async def main():
     os.makedirs(extract_dir, exist_ok=True)
     
     async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
-        # Single pin status message that rewrites itself to prevent alert fatigue
-        status_msg = await client.send_message('me', "🚀 **Staging Environment Initialized...**")
-        print(f"📡 Targeting Channel: {channel_id} | Range: {start_msg_id} -> {end_msg_id}")
+        status_msg = await client.send_message('me', "🚀 **High-Speed Staging Cluster Initialized...**")
         
-        # --- PHASE 1: COLLECT ALL VALID MEDIA MESSAGES IN THE RANGE ---
+        # --- PHASE 1: COLLECT CHAT MESSAGES ---
         valid_messages = []
         for msg_id in range(start_msg_id, end_msg_id + 1):
             try:
                 msg = await client.get_messages(channel_id, ids=msg_id)
                 if msg and msg.media and isinstance(msg.media, MessageMediaDocument):
                     valid_messages.append(msg)
-                else:
-                    print(f"ℹ️ Skipped msg {msg_id}: Not a valid file document attachment.")
             except Exception as e:
-                # Immediate Failure alert to chat
-                await client.send_message('me', f"⚠️ **Scraping Error:** Critical access fault checking link ID `{msg_id}`\n`Error: {e}`")
                 print(f"❌ Error checking msg {msg_id}: {e}")
 
         if not valid_messages:
-            await status_msg.edit("❌ **Staging terminated:** No valid document files discovered in requested link scope.")
+            await status_msg.edit("❌ **Staging terminated:** No valid documents found.")
             sys.exit(1)
 
         total_parts = len(valid_messages)
-        downloaded_files = []
-        
-        # Notify once that downloading is underway instead of sending a text for every single part
-        await status_msg.edit(f"📥 **Downloading multi-part archive chain ({total_parts} segments identified)...**")
+        await status_msg.edit(f"⚡ **Launching Concurrent Pipeline for {total_parts} segments...**")
 
-        # --- PHASE 2: DOWNLOAD WITH REVERSE RE-NAMING SYSTEM ---
+        # --- PHASE 2: CONCURRENT DOWNLOAD WITH CORRECT WINRAR STRUCTURAL MAPPING ---
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+        tasks = []
+        
         for idx, msg in enumerate(valid_messages):
-            original_name = msg.file.name or f"unknown_{msg.id}"
-            position_from_end = total_parts - 1 - idx
-            
-            if position_from_end == 0:
+            # If it's the last message in the range, it is the main master .zip file!
+            if idx == total_parts - 1:
                 forced_filename = "fixed_archive.zip"
             else:
-                forced_filename = f"fixed_archive.z{position_from_end:02d}"
+                # Preceding messages are .z01, .z02, etc.
+                part_num = idx + 1
+                forced_filename = f"fixed_archive.z{part_num:02d}"
                 
             file_path = os.path.join(download_dir, forced_filename)
+            print(f"🔧 Mapping Slot [{idx+1}/{total_parts}] -> Original: '{msg.file.name}' to Forced Name: '{forced_filename}'")
             
-            # Print sequence tweaks silently to GitHub actions for tracing adjustments
-            print(f"🔧 File Match Index [{idx+1}/{total_parts}] -> Original: '{original_name}' mapped to Forced Output: '{forced_filename}'")
+            task = asyncio.create_task(download_worker(semaphore, client, msg, file_path, forced_filename))
+            tasks.append(task)
             
-            try:
-                tracker = TelegramProgress(client, status_msg, forced_filename, f"Downloading Part ({idx+1}/{total_parts})")
-                await client.download_media(msg, file_path, progress_callback=tracker)
-                downloaded_files.append(file_path)
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                await client.send_message('me', f"🚨 **Download Interruption:** Failed downloading segment sequence for link ID `{msg.id}`\n`Error: {e}`")
-                print(f"❌ Error downloading file on msg {msg.id}: {e}")
-            
-        # --- PHASE 3: RUN TARGETED EXTRACTION ON THE TAIL HEAD ---
-        await status_msg.edit("📦 **All volumes successfully cached. Extracting core structure...**")
+        results = await asyncio.gather(*tasks)
+        downloaded_files = [path for path in results if path is not None]
+
+        # --- PHASE 3: EXTRACTION TARGETING ONLY THE ZIP ROOT ---
+        await status_msg.edit("📦 **Download cluster finished. Running Owner-Instructed 7z Extraction...**")
+        
+        # Following instructions perfectly: Target ONLY the main zip file
         main_entry = os.path.join(download_dir, "fixed_archive.zip")
         
         result = subprocess.run(["7z", "x", main_entry, f"-o{extract_dir}", "-y"], capture_output=True, text=True)
         if result.returncode != 0:
-            # Send immediate comprehensive debugging block inside chat if the 7z pipeline crashes
-            await status_msg.edit("💥 **Extraction Failure:** The multi-part archive layout tracking broke down.")
-            
-            # Single line concatenation to prevent any multi-line copy-paste syntax errors
+            await status_msg.edit("💥 **Extraction Failure.** Checking trace logs...")
             debug_trace = result.stderr[:3500]
             await client.send_message('me', "📂 **7z Engine Debug Trace:**\n```\n" + debug_trace + "\n```")
-            print(f"❌ 7z Error Output:\n{result.stderr}")
             sys.exit(1)
             
-        # Clear original archive blocks out of workspace memory
+        # Clear out original archive chunks immediately to save space
         for f in downloaded_files:
             if os.path.exists(f): os.remove(f)
 
-        # --- PHASE 4: GENERATE RECURSIVE MAP ---
-        await status_msg.edit("🗺️ **Analyzing extracted structures...**")
+        # --- PHASE 4: ANALYSIS AND MAP GENERATION ---
+        await status_msg.edit("🗺️ **Generating Extraction Tree Map...**")
         map_lines = []
         streamable_items = []
         non_streamable_items = []
@@ -217,44 +189,38 @@ async def main():
                 else:
                     non_streamable_items.append(file_info)
                     
-        # Send layout map straight to user via split messages (This is a Main Event)
         await send_split_messages(client, "📋 **Final Extracted Material Layout Map:**", map_lines)
 
-        # --- PHASE 5: DISPATCH NON-STREAMABLE ELEMENTS ---
+        # --- PHASE 5: DOCUMENT PROCESSING ---
         if non_streamable_items:
-            print(f"ℹ️ Found {len(non_streamable_items)} non-streamable elements. Uploading to Saved Messages...")
             for item in non_streamable_items:
                 try:
                     caption = f"📎 **File:** `{item['name']}`\n📁 **Path:** `{item['relative_folder']}`"
-                    tracker = TelegramProgress(client, status_msg, item['name'], "Uploading Document")
-                    await client.send_file('me', item['absolute_path'], caption=caption, progress_callback=tracker)
-                except Exception as e:
-                    await client.send_message('me', f"⚠️ **File Route Failure:** Failed adding `{item['name']}` to Telegram chat queue.\n`Error: {e}`")
+                    await client.send_file('me', item['absolute_path'], caption=caption)
+                except Exception:
+                    pass
                 finally:
                     if os.path.exists(item['absolute_path']): os.remove(item['absolute_path'])
 
-        # --- PHASE 6: WIRE VIDEO SEGMENTS INTO BUNNY DASHBOARD ---
+        # --- PHASE 6: WIRE VIDEOS TO BUNNY ---
         if streamable_items:
-            print(f"🎬 Found {len(streamable_items)} streamable elements. Delivering to Bunny Stream...")
+            await status_msg.edit(f"🎬 **Wiring {len(streamable_items)} files straight into Bunny Stream...**")
             for video in streamable_items:
                 try:
                     mapped_title = video['name'] if video['relative_folder'] == "." else f"{video['relative_folder'].replace(os.sep, ' - ')} - {video['name']}"
-                    
-                    print(f"🧬 Building Bunny item footprint for: {mapped_title}")
                     bunny_id = create_bunny_placeholder(mapped_title)
                     
-                    tracker = TelegramProgress(client, status_msg, video['name'], "Bunny Transmitting")
                     loop = asyncio.get_event_loop()
                     success = await loop.run_in_executor(None, upload_to_bunny, bunny_id, video['absolute_path'])
                     
-                    if not success:
-                        await client.send_message('me', f"❌ **Bunny Stream Rejection:** Transmission handshake timed out for video object: `{mapped_title}`")
+                    if success:
+                        await client.send_message('me', f"✅ **Wired to Bunny!**\n🎬 Title: `{mapped_title}`\n🆔 ID: `{bunny_id}`")
                 except Exception as e:
-                    await client.send_message('me', f"⚠️ **Bunny API Error:** Couldn't pipe item `{video['name']}`\n`Error: {e}`")
+                    print(f"⚠️ Error routing video {video['name']}: {e}")
                 finally:
                     if os.path.exists(video['absolute_path']): os.remove(video['absolute_path'])
 
-        await status_msg.edit("🎉 **All elements fully inverted, extracted, mapped, and wired successfully!**")
+        await status_msg.edit("🎉 **All elements fully extracted, mapped, and wired successfully!**")
 
 if __name__ == "__main__":
     asyncio.run(main())
