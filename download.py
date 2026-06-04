@@ -104,7 +104,16 @@ async def main():
     os.makedirs(download_dir, exist_ok=True)
     os.makedirs(extract_dir, exist_ok=True)
     
-    async with TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH) as client:
+    # Import the obfuscated layer to bypass GitHub data center firewall restrictions
+    from telethon.network import ConnectionTcpObfuscated
+
+    print("🛰️ Establishing Obfuscated MTProto Channel to bypass network timeouts...")
+    async with TelegramClient(
+        StringSession(STRING_SESSION), 
+        API_ID, 
+        API_HASH,
+        connection=ConnectionTcpObfuscated
+    ) as client:
         status_msg = await client.send_message('me', "🚀 **High-Speed Staging Cluster Initialized...**")
         
         # --- PHASE 1: COLLECT CHAT MESSAGES ---
